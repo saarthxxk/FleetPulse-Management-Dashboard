@@ -1,6 +1,5 @@
 // seed/simulate.js
 // Run: node seed/simulate.js
-// Requires: npm install @supabase/supabase-js dotenv (in project root)
 
 import { createClient } from '@supabase/supabase-js'
 import { config } from 'dotenv'
@@ -15,27 +14,25 @@ const supabase = createClient(
   process.env.VITE_SUPABASE_ANON_KEY
 )
 
-// ─── Delhi NCR route waypoints ────────────────────────────────────────────────
-// Each route is a loop of lat/lng waypoints the vehicle advances through
 const ROUTES = {
-  r1: [ // Connaught Place → India Gate → Lodi → Saket
+  r1: [
     [28.6315, 77.2167], [28.6252, 77.2295], [28.5930, 77.2272],
     [28.5274, 77.2167], [28.5205, 77.2149], [28.5274, 77.2167],
     [28.5930, 77.2272], [28.6252, 77.2295],
   ],
-  r2: [ // Dwarka → Janakpuri → Rajouri → Karol Bagh
+  r2: [
     [28.5823, 77.0580], [28.6219, 77.0825], [28.6412, 77.1185],
     [28.6514, 77.1894], [28.6412, 77.1185], [28.6219, 77.0825],
   ],
-  r3: [ // Noida Sector 18 → Sector 62 → Ghaziabad
+  r3: [
     [28.5709, 77.3219], [28.6279, 77.3719], [28.6596, 77.4038],
     [28.6279, 77.3719], [28.5709, 77.3219],
   ],
-  r4: [ // Gurugram Cyber City → MG Road → Sohna Road → NH48
+  r4: [
     [28.4946, 77.0887], [28.4797, 77.0882], [28.4232, 77.0280],
     [28.3891, 77.0456], [28.4232, 77.0280], [28.4797, 77.0882],
   ],
-  r5: [ // Faridabad → Badarpur → Sarita Vihar → Okhla
+  r5: [
     [28.4089, 77.3178], [28.5035, 77.3019], [28.5416, 77.2938],
     [28.5518, 77.2749], [28.5416, 77.2938], [28.5035, 77.3019],
   ],
@@ -56,23 +53,30 @@ const VEHICLE_CONFIGS = [
   { reg: 'DL08DI6789', type: 'truck',      health: 'offline',  routeKey: 'r2', speed:  0, fuel: 50, battery: 60, active: false },
 ]
 
-const ALERT_TEMPLATES = [
-  { type: 'low_fuel',         severity: 'warning',  message: 'Fuel level below 20% — refuel required' },
-  { type: 'low_battery',      severity: 'warning',  message: 'Battery voltage dropping — check alternator' },
-  { type: 'engine_warning',   severity: 'warning',  message: 'Engine warning light active' },
-  { type: 'high_engine_temp', severity: 'critical', message: 'Engine temperature critical — stop immediately' },
-  { type: 'low_battery',      severity: 'critical', message: 'Battery critically low — vehicle may stall' },
-  { type: 'low_fuel',         severity: 'critical', message: 'Fuel critically low — less than 5% remaining' },
-]
+// ─── Alert thresholds ─────────────────────────────────────────────────────────
+// Alerts are only active when the vehicle's telemetry actually breaches these.
+// When a vehicle recovers, its open alerts are resolved automatically.
+const THRESHOLDS = {
+  fuel_critical:    5,   // fuel% → critical
+  fuel_warning:    20,   // fuel% → warning
+  battery_critical: 15,  // battery% → critical
+  battery_warning:  30,  // battery% → warning
+}
 
-// ─── State ────────────────────────────────────────────────────────────────────
-const vehicleState = {}   // vehicleId → { stepIndex, tripId }
-const vehicleIds   = {}   // reg → id (populated after upsert)
+const vehicleState = {}
+const vehicleIds   = {}
 let tick = 0
 
 // ─── Seed vehicles ────────────────────────────────────────────────────────────
 async function seedVehicles() {
   console.log('[seed] Seeding 12 vehicles…')
+
+  // Clear stale unresolved alerts from previous seeder runs to start clean
+  await supabase
+    .from('vehicle_alerts')
+    .update({ is_resolved: true, resolved_at: new Date().toISOString() })
+    .eq('is_resolved', false)
+  console.log('[seed] Cleared stale open alerts')
 
   for (const cfg of VEHICLE_CONFIGS) {
     const route = ROUTES[cfg.routeKey]
@@ -139,6 +143,80 @@ async function seedVehicles() {
   console.log('[seed] Vehicles and trips seeded. Starting simulation…')
 }
 
+// ─── Alert reconciliation ─────────────────────────────────────────────────────
+// For a given vehicle, checks telemetry and ensures alerts are consistent:
+// - Creates a new alert if a threshold is breached and no open alert of that type exists
+// - Resolves open alerts whose condition has cleared
+async function reconcileAlerts(vid, cfg) {
+  const now = new Date().toISOString()
+
+  // Determine which alert types should currently be active
+  const shouldBeActive = []
+
+  if (cfg.fuel <= THRESHOLDS.fuel_critical) {
+    shouldBeActive.push({ type: 'low_fuel', severity: 'critical', message: `[${cfg.reg}] Fuel critically low — less than 5% remaining` })
+  } else if (cfg.fuel <= THRESHOLDS.fuel_warning) {
+    shouldBeActive.push({ type: 'low_fuel', severity: 'warning', message: `[${cfg.reg}] Fuel level below 20% — refuel required` })
+  }
+
+  if (cfg.battery <= THRESHOLDS.battery_critical) {
+    shouldBeActive.push({ type: 'low_battery', severity: 'critical', message: `[${cfg.reg}] Battery critically low — vehicle may stall` })
+  } else if (cfg.battery <= THRESHOLDS.battery_warning) {
+    shouldBeActive.push({ type: 'low_battery', severity: 'warning', message: `[${cfg.reg}] Battery voltage dropping — check alternator` })
+  }
+
+  // Fetch all currently open alerts for this vehicle
+  const { data: openAlerts } = await supabase
+    .from('vehicle_alerts')
+    .select('id, type, severity')
+    .eq('vehicle_id', vid)
+    .eq('is_resolved', false)
+
+  const openByType = Object.fromEntries((openAlerts ?? []).map((a) => [a.type, a]))
+
+  // Resolve alerts whose condition has cleared
+  for (const open of openAlerts ?? []) {
+    const stillActive = shouldBeActive.some((s) => s.type === open.type)
+    if (!stillActive) {
+      await supabase
+        .from('vehicle_alerts')
+        .update({ is_resolved: true, resolved_at: now })
+        .eq('id', open.id)
+      console.log(`[seed] ✓ Resolved ${open.type} alert for ${cfg.reg}`)
+    }
+  }
+
+  // Create new alerts for newly breached conditions
+  for (const alert of shouldBeActive) {
+    if (!openByType[alert.type]) {
+      const state = vehicleState[vid]
+      await supabase.from('vehicle_alerts').insert({
+        vehicle_id: vid,
+        trip_id: state?.tripId ?? null,
+        type: alert.type,
+        severity: alert.severity,
+        message: alert.message,
+        is_resolved: false,
+        created_at: now,
+        resolved_at: null,
+      })
+      console.log(`[seed] ⚠ New alert: ${cfg.reg} — ${alert.message}`)
+    }
+  }
+
+  // Derive health_status from active conditions
+  const hasCritical = shouldBeActive.some((s) => s.severity === 'critical')
+  const hasWarning  = shouldBeActive.some((s) => s.severity === 'warning')
+  const newHealth   = hasCritical ? 'critical' : hasWarning ? 'warning' : 'ok'
+
+  // Only update if health changed (avoids unnecessary writes)
+  if (newHealth !== cfg.health) {
+    await supabase.from('vehicles').update({ health_status: newHealth }).eq('id', vid)
+    cfg.health = newHealth
+    console.log(`[seed] Health ${cfg.reg}: ${newHealth}`)
+  }
+}
+
 // ─── Tick ─────────────────────────────────────────────────────────────────────
 async function simulateTick() {
   tick++
@@ -152,13 +230,12 @@ async function simulateTick() {
     const state = vehicleState[vid]
     const route = ROUTES[cfg.routeKey]
 
-    // Advance one step (loop)
     state.stepIndex = (state.stepIndex + 1) % route.length
     const [lat, lng] = route[state.stepIndex]
     const speed = Math.max(0, cfg.speed + (Math.random() * 10 - 5))
 
-    // Degrade fuel slightly
-    cfg.fuel = Math.max(0, cfg.fuel - 0.3)
+    // Degrade telemetry each tick
+    cfg.fuel    = Math.max(0, cfg.fuel    - 0.3)
     cfg.battery = Math.max(0, cfg.battery - 0.05)
 
     updates.push(
@@ -175,7 +252,6 @@ async function simulateTick() {
         .eq('id', vid)
     )
 
-    // Insert breadcrumb into trip_locations
     if (state.tripId) {
       updates.push(
         supabase.from('trip_locations').insert({
@@ -191,32 +267,10 @@ async function simulateTick() {
 
   await Promise.all(updates)
 
-  // Every ~20 ticks: insert a random alert on a random active vehicle
-  if (tick % 20 === 0) {
-    const activeVehicles = VEHICLE_CONFIGS.filter((c) => c.active && vehicleIds[c.reg])
-    const target = activeVehicles[Math.floor(Math.random() * activeVehicles.length)]
-    if (target) {
-      const vid       = vehicleIds[target.reg]
-      const template  = ALERT_TEMPLATES[Math.floor(Math.random() * ALERT_TEMPLATES.length)]
-      const state     = vehicleState[vid]
-
-      await supabase.from('vehicle_alerts').insert({
-        vehicle_id: vid,
-        trip_id: state.tripId ?? null,
-        type: template.type,
-        severity: template.severity,
-        message: `[${target.reg}] ${template.message}`,
-        is_resolved: false,
-        created_at: new Date().toISOString(),
-        resolved_at: null,
-      })
-
-      // Update vehicle health_status to match severity
-      const newHealth = template.severity === 'critical' ? 'critical' : 'warning'
-      await supabase.from('vehicles').update({ health_status: newHealth }).eq('id', vid)
-
-      console.log(`[seed] ⚠ Alert: ${target.reg} — ${template.message}`)
-    }
+  // Every tick: reconcile alerts based on actual telemetry
+  // Run sequentially (not Promise.all) to avoid hammering Supabase
+  for (const cfg of VEHICLE_CONFIGS.filter((c) => c.active && vehicleIds[c.reg])) {
+    await reconcileAlerts(vehicleIds[cfg.reg], cfg)
   }
 
   console.log(`[seed] tick ${tick} — ${new Date().toLocaleTimeString()}`)
