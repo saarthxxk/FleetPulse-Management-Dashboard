@@ -15,32 +15,23 @@ export interface LoginData {
 export async function signUp(data: SignUpData) {
   const { email, password, fullName } = data
 
-  // Sign up the auth user.
-  // When email confirmation is enabled, Supabase sends a verification email
-  // and returns the user with identityData but no active session yet.
-  // We do NOT insert into profiles here — the user isn't confirmed and has no
-  // active session, so the insert will fail RLS. Profile is created on first login.
   const { data: authData, error: authError } = await supabase.auth.signUp({
     email,
     password,
     options: {
-      // Pass full_name as metadata so a DB trigger can use it,
-      // and so we can use it when creating the profile after confirmation.
       data: { full_name: fullName },
     },
   })
 
   if (authError) throw authError
 
-  // Supabase returns a fake user object even for duplicate emails when
-  // "Confirm email" is on — check identities to detect the duplicate case.
+  // Supabase returns identities: [] for duplicate emails when confirm is on
   if (authData.user && authData.user.identities?.length === 0) {
     throw new Error('Email is already registered')
   }
 
   if (!authData.user) throw new Error('Sign up failed')
 
-  // Return a flag so LoginPage knows to show the verification message
   return { emailConfirmationRequired: true }
 }
 
@@ -56,33 +47,41 @@ export async function login(data: LoginData) {
   if (authError) throw authError
   if (!authData.user) throw new Error('Login failed')
 
-  // Fetch profile — may not exist yet if this is first login after confirmation.
-  // If missing, create it now using the metadata stored during signUp.
-  let { data: profile } = await supabase
+  // Fetch existing profile
+  let { data: profileData } = await supabase
     .from('profiles')
     .select('*')
     .eq('id', authData.user.id)
     .single()
 
-  if (!profile) {
+  // First login after confirmation — profile doesn't exist yet, create it
+  if (!profileData) {
     const fullName =
-      (authData.user.user_metadata?.full_name as string | undefined) ?? email.split('@')[0]
+      (authData.user.user_metadata?.full_name as string | undefined) ??
+      email.split('@')[0]
 
-    const { data: newProfile, error: insertError } = await supabase
+    // Cast payload to any to avoid the Supabase typed client's 'never[]' inference
+    // on tables whose Insert type differs from Row (id is normally auto-generated
+    // but here we're providing it explicitly to match the auth user UUID).
+    const { data: newProfileData, error: insertError } = await (supabase
       .from('profiles')
-      .insert({ id: authData.user.id, full_name: fullName, role: 'operator' })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .insert({ id: authData.user.id, full_name: fullName, role: 'operator' } as any)
       .select('*')
-      .single()
+      .single() as any)
 
     if (insertError) {
-      // Non-fatal: user can still access the dashboard without a profile row
       console.warn('[auth] Profile insert failed:', insertError.message)
     } else {
-      profile = newProfile
+      profileData = newProfileData
     }
   }
 
-  return { user: authData.user, profile: profile as UserProfile }
+  // Cast through unknown to satisfy strict null checks —
+  // profileData is UserProfile at runtime; null only if insert failed above.
+  const profile = profileData as unknown as UserProfile | null
+
+  return { user: authData.user, profile }
 }
 
 export async function logout() {
@@ -99,13 +98,14 @@ export async function getCurrentUser() {
   if (error) throw error
   if (!user) return null
 
-  const { data: profile } = await supabase
+  const { data: profileData } = await supabase
     .from('profiles')
     .select('*')
     .eq('id', user.id)
     .single()
 
-  return { user, profile: (profile as UserProfile) ?? null }
+  const profile = profileData as unknown as UserProfile | null
+  return { user, profile }
 }
 
 export function onAuthStateChange(
@@ -116,15 +116,17 @@ export function onAuthStateChange(
 ) {
   return supabase.auth.onAuthStateChange(async (_event, session) => {
     if (session?.user) {
-      const { data: profile } = await supabase
+      const { data: profileData } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', session.user.id)
         .single()
 
+      const profile = profileData as unknown as UserProfile | null
+
       callback({
         user: { id: session.user.id, email: session.user.email ?? '' },
-        profile: (profile as UserProfile) ?? null,
+        profile,
       })
     } else {
       callback({ user: null, profile: null })
