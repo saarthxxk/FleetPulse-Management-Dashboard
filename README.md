@@ -1,217 +1,220 @@
 # FleetPulse
 
-An internal fleet management dashboard for operations teams to monitor vehicles in real time, review trip history, and track vehicle health.
+A real-time fleet management dashboard for operations teams. Built as a frontend internship assignment for Bytebeam.
 
-Built as a frontend internship assignment for Bytebeam.
+Operations teams use FleetPulse to answer three questions immediately on open:
+- **Where are my vehicles right now?**
+- **Does anything need attention?**
+- **What has a specific vehicle been doing?**
 
----
-
-## Live URL
-
-> Add your deployed URL here after deploying to Vercel / Netlify
-
----
-
-## Demo Login
-
-```
-Email:    ops@fleetpulse.io
-Password: fleetpulse2024
-```
-
-> Create this user in your Supabase Auth dashboard and add a matching row to the `profiles` table.
+The dashboard prioritizes urgent information first through alerts and health indicators, while keeping route and trip history one interaction away.
 
 ---
 
-## Stack
+## Live Demo
+
+| | |
+|---|---|
+| **URL** | https://fleet-pulse-management-dashboard.vercel.app/ |
+| **Email** | `ops@fleetpulse.io` |
+| **Password** | `fleetpulse2024` |
+
+> The dashboard includes seeded fleet data. Running the simulator is optional and demonstrates live vehicle movement and alert generation.
+
+---
+
+## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | Framework | React 19 + TypeScript |
-| Build | Vite 6 |
-| Styling | Tailwind CSS v4 (`@tailwindcss/vite`, no config file) |
-| State | Zustand 5 |
-| Data fetching | Custom hooks with Supabase REST + polling |
-| Map | react-leaflet 5 + Leaflet 1.9 |
-| Auth | Supabase Auth |
-| Backend | Supabase (Postgres + RLS) |
+| Build tool | Vite 8 |
+| Styling | Tailwind CSS v4 — `@tailwindcss/vite` plugin, no config file, `@theme` tokens in `index.css` |
+| Global state | Zustand 5 |
+| Map | react-leaflet 5 + Leaflet 1.9, CARTO dark tiles |
+| Auth | Supabase Auth (email + password, email confirmation) |
+| Database | Supabase (Postgres + Row Level Security) |
+| Data fetching | Custom React hooks, REST polling every 15s |
+| Router | React Router v7 |
 
 ---
 
-## Supabase Setup
-
-### 1. Create tables
-
-Run the following in the Supabase SQL editor:
-
-```sql
--- Profiles (mirrors auth.users)
-create table profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  full_name text not null,
-  role text not null check (role in ('admin', 'operator')),
-  created_at timestamptz default now()
-);
-
--- Vehicles
-create table vehicles (
-  id uuid primary key default gen_random_uuid(),
-  registration_number text unique not null,
-  vehicle_type text not null check (vehicle_type in ('truck', 'van', 'motorcycle')),
-  current_lat float not null,
-  current_lng float not null,
-  current_speed float not null default 0,
-  fuel_level float not null default 100,
-  battery_level float not null default 100,
-  health_status text not null check (health_status in ('ok', 'warning', 'critical', 'offline')) default 'ok',
-  last_seen_at timestamptz not null default now(),
-  is_active boolean not null default true
-);
-
--- Trips
-create table trips (
-  id uuid primary key default gen_random_uuid(),
-  vehicle_id uuid not null references vehicles(id) on delete cascade,
-  started_at timestamptz not null,
-  ended_at timestamptz,
-  start_lat float not null,
-  start_lng float not null,
-  end_lat float,
-  end_lng float,
-  distance_km float,
-  duration_minutes float,
-  status text not null check (status in ('in_progress', 'completed', 'cancelled')) default 'in_progress'
-);
-
--- Trip locations (breadcrumbs)
-create table trip_locations (
-  id uuid primary key default gen_random_uuid(),
-  trip_id uuid not null references trips(id) on delete cascade,
-  lat float not null,
-  lng float not null,
-  speed float not null default 0,
-  recorded_at timestamptz not null default now()
-);
-
--- Vehicle alerts
-create table vehicle_alerts (
-  id uuid primary key default gen_random_uuid(),
-  vehicle_id uuid not null references vehicles(id) on delete cascade,
-  trip_id uuid references trips(id) on delete set null,
-  type text not null,
-  severity text not null check (severity in ('warning', 'critical')),
-  message text not null,
-  is_resolved boolean not null default false,
-  created_at timestamptz not null default now(),
-  resolved_at timestamptz
-);
-```
-
-### 2. Enable RLS and add policies
-
-```sql
--- Enable RLS on all tables
-alter table profiles       enable row level security;
-alter table vehicles       enable row level security;
-alter table trips          enable row level security;
-alter table trip_locations enable row level security;
-alter table vehicle_alerts enable row level security;
-
--- Authenticated users can read everything
-create policy "Authenticated read" on vehicles       for select using (auth.role() = 'authenticated');
-create policy "Authenticated read" on trips          for select using (auth.role() = 'authenticated');
-create policy "Authenticated read" on trip_locations for select using (auth.role() = 'authenticated');
-create policy "Authenticated read" on vehicle_alerts for select using (auth.role() = 'authenticated');
-
--- Profiles: users can only read their own row
-create policy "Own profile" on profiles for select using (auth.uid() = id);
-
--- Service role (seeder) needs full access — use service key in seeder for production
--- For MVP: disable RLS on vehicles/trips/trip_locations/vehicle_alerts for seeder writes,
--- or add an insert policy for anon role (not recommended for production).
-```
-
-> **Note:** The seeder uses `VITE_SUPABASE_ANON_KEY`. For a production setup, use the service role key in the seeder and keep it out of the frontend bundle.
-
-### 3. Create a demo user
-
-1. Go to **Authentication → Users** in your Supabase dashboard
-2. Create a user with email `ops@fleetpulse.io` and your chosen password
-3. Copy the user's UUID
-4. Run in SQL editor:
-   ```sql
-   insert into profiles (id, full_name, role)
-   values ('<user-uuid>', 'Ops Manager', 'operator');
-   ```
-
-### 4. Environment variables
-
-Create `.env.local` in the project root:
+## Project Structure
 
 ```
-VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key
+fleetpulse/
+├── src/
+│   ├── components/
+│   │   ├── detail/      # VehicleDetailPanel, TelemetryGrid, TripList, HealthEventList
+│   │   ├── layout/      # AlertStrip (KPI cards + alert feed), VehicleSidebar, ConnectionIndicator
+│   │   ├── map/         # MapView, VehiclePin, RouteLayer, FlyToVehicle
+│   │   ├── ui/          # EmptyState, SkeletonLoader, Spinner
+│   │   └── vehicle/     # VehicleCard, HealthBadge, StatusDot, LastSeenTag
+│   ├── hooks/           # useVehicles, useAlerts, useVehicleDetail, useRouteLayer, useAuth
+│   ├── lib/             # supabase.ts (typed client), auth.ts (auth service)
+│   ├── pages/           # LoginPage, DashboardPage
+│   ├── router/          # ProtectedRoute
+│   ├── store/           # useFleetStore (Zustand)
+│   └── types/           # database.ts (Supabase types), index.ts (app types + enums)
+├── seed/
+│   └── simulate.js      # Node seeder — 12 vehicles, Delhi NCR routes, alert reconciliation
+├── schema.sql           # Complete database schema — run this in Supabase SQL Editor
+└── .env.local           # Your Supabase credentials (not committed, create manually)
 ```
 
 ---
 
-## Running the app
+## Local Setup
+
+### 1. Extract the ZIP
+
+Unzip the project and open the folder:
+
+```
+fleetpulse-submission.zip
+└── fleetpulse/          ← open this folder in your terminal
+```
+
+### 2. Install dependencies
 
 ```bash
 npm install
+```
+
+### 3. Create environment variables
+
+Create a file named `.env.local` in the project root (next to `package.json`):
+
+```env
+VITE_SUPABASE_URL=your-supabase-project-url
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+```
+
+Both values are found in your Supabase dashboard under **Project Settings → API**.
+
+### 4. Set up the database
+
+The full schema is in `schema.sql` at the root of the project.
+
+Open your Supabase **SQL Editor**, paste the contents of `schema.sql`, and run it. This creates all five tables and the RLS policies in one step.
+
+### 5. Create the demo user
+
+1. Go to **Authentication → Users** in your Supabase dashboard
+2. Click **Add user** → create `ops@fleetpulse.io` with password `fleetpulse2024`
+3. Copy the generated UUID
+4. Run this in the Supabase SQL Editor (replace the UUID):
+
+```sql
+insert into profiles (id, full_name, role)
+values ('<paste-uuid-here>', 'Ops Manager', 'operator');
+```
+
+### 6. Configure Supabase redirect URL
+
+Required so that verification emails link to the deployed app instead of localhost.
+
+1. Go to **Authentication → URL Configuration**
+2. Set **Site URL** to `https://your-project.vercel.app`
+3. Add `https://your-project.vercel.app/**` to **Redirect URLs**
+
+### 7. Run the app
+
+```bash
 npm run dev
 ```
 
+Open [http://localhost:5173](http://localhost:5173) and sign in with the demo credentials.
+
 ---
 
-## Running the seeder
+## Running the Seeder
 
-The seeder simulates 12 vehicles moving along Delhi NCR routes and generates health alerts periodically.
+The seeder simulates 12 vehicles moving along real Delhi NCR road corridors. It must be running for the dashboard to show live vehicle movement, breadcrumb trails, and alerts.
+
+Open a second terminal in the project folder and run:
 
 ```bash
-# Install seeder dependencies (dotenv needed)
-npm install
-
-# Run seeder — keep this terminal open while demoing
 node seed/simulate.js
 ```
 
-The seeder:
-- Upserts 12 vehicles on first run (7 ok, 3 warning, 1 critical, 1 offline)
-- Seeds one in-progress trip per active vehicle
-- Advances each vehicle along its route every 10 seconds
-- Inserts `trip_locations` breadcrumbs on every tick
-- Fires a random `vehicle_alerts` event every ~20 ticks
-- Updates `health_status` on the vehicle when an alert fires
+Keep this terminal open while reviewing the dashboard.
+
+**What the seeder does on each 10-second tick:**
+
+- Advances each vehicle one step along its route
+- Inserts a `trip_locations` breadcrumb for the route trail
+- Degrades fuel and battery slightly each tick
+- Checks actual telemetry against thresholds — creates alerts when breached, resolves them automatically when the vehicle recovers
+
+**On startup the seeder:**
+
+- Clears all stale open alerts from any previous run
+- Upserts 12 vehicles (7 healthy, 3 warning, 1 critical, 1 offline)
+- Creates one in-progress trip per active vehicle
+
+**Alert thresholds:**
+
+| Metric | Warning | Critical |
+|---|---|---|
+| Fuel level | ≤ 20% | ≤ 5% |
+| Battery level | ≤ 30% | ≤ 15% |
 
 ---
 
-## Architecture decisions
+## Key Architecture Decisions
 
 ### Map always mounted
-`MapView` is never unmounted. The `VehicleDetailPanel` is `position: absolute` over the map — it doesn't push or replace it. This avoids Leaflet re-initialization on every vehicle click.
+`MapView` is never unmounted. `VehicleDetailPanel` is `position: absolute` overlaid on top — it doesn't push or replace the map. This avoids Leaflet re-initialization on every vehicle click, which causes a visible flash and resets the viewport.
 
 ### Atomic vehicle selection
-`selectVehicle(id)` in Zustand always resets `selectedTripId` to null simultaneously. There is no separate setter for `selectedVehicleId`. This prevents a stale trip route from a previous vehicle appearing on the new selection.
+`selectVehicle(id)` in Zustand always resets `selectedTripId` to `null` in the same operation. There is no separate setter for `selectedVehicleId`. This prevents a route from a previous vehicle's trip remaining on screen when a new vehicle is selected.
 
 ### Polling over WebSockets
-Vehicles and alerts poll every 15 seconds via `setInterval`. This is the correct tradeoff for an MVP: no WebSocket infra, predictable behavior, easy to reason about. The `ConnectionIndicator` surfaces staleness if polling falls behind.
+Vehicles and alerts poll every 15 seconds via `setInterval`. For an MVP dashboard this is the right tradeoff: no WebSocket infrastructure, predictable behavior, and the `ConnectionIndicator` surfaces data staleness visually — amber after 20s, red after 60s.
 
 ### Denormalized health status
-`vehicles.health_status` is stored directly on the vehicle row even though `vehicle_alerts` contains the same signal. This means the fleet list query is a simple `SELECT *` with no join. The seeder updates both when an alert fires.
+`vehicles.health_status` is stored directly on the vehicle row even though the same signal exists in `vehicle_alerts`. This means the fleet list query is a plain `SELECT *` with no joins. The seeder updates `health_status` whenever an alert is created or resolved, keeping both in sync.
 
-### No vehicles page
-The sidebar with inline search replaces a separate vehicles table page. This keeps the user's spatial context (the map) always visible.
+### Profile created on first login, not on signup
+With Supabase email confirmation enabled, the user has no active session immediately after `signUp()`. Inserting into `profiles` at that point would fail RLS. Instead, `full_name` is stored in `user_metadata` during signup, and the profile row is created on the first successful login after confirmation.
+
+### Alert reconciliation in the seeder
+Alerts are not generated randomly on a timer. The seeder checks actual fuel and battery values against defined thresholds every tick, creates alerts only when a condition is newly breached, and resolves them automatically when the vehicle recovers. This keeps the alert strip consistent with the telemetry shown in the detail panel.
 
 ---
 
-## AI tools used
+## Tradeoffs
 
-Claude (Anthropic) was used throughout this project for:
+### Chosen
+- Polling every 15s instead of WebSockets
+- Single operator role
+- Route history stored as trip breadcrumbs
+- Vehicle health denormalized onto vehicle record
 
-- **Product discovery**: defining the core user, workflows, and MVP scope
-- **Schema design**: reasoning through table structure, field choices, and tradeoffs
-- **Architecture design**: component tree, state shape, hook responsibilities
-- **Code generation**: all component implementations were generated and then reviewed and adapted
+### Deferred
+- Multi-role permissions
+- Geofencing
+- Maintenance scheduling
+- Push notifications
+- Fleet analytics
 
-All generated code was reviewed, integrated, and tested manually. Architecture decisions were made collaboratively through a structured discovery process before any code was written.
+--
+
+## AI Tools Used
+
+Claude (Anthropic) was used throughout this project:
+
+- **Product discovery** — defining the primary user, core workflows, and MVP scope before any code was written
+- **Schema design** — reasoning through table structure, field ownership, and deliberate tradeoffs (e.g. denormalized `health_status`, scoping `trip_locations` to trips rather than vehicles)
+- **Architecture design** — component tree, Zustand store shape, hook responsibilities, edge case planning
+- **Code generation** — all component and hook implementations were generated then reviewed, debugged, and integrated manually
+- **Debugging** — TypeScript errors, RLS policy issues, Leaflet rendering problems, and Supabase auth edge cases were diagnosed collaboratively
+
+All generated code was read, understood, and tested before being used. No code was accepted without being reviewed.
+
+--
+
+## AI Chat Logs
+
+- **Chat Link** - https://claude.ai/share/45ba1317-0308-41bc-876d-f2d4c518ccb5
