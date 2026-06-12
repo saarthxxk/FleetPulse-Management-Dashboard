@@ -199,7 +199,7 @@ Alerts are not generated randomly on a timer. The seeder checks actual fuel and 
 - Push notifications
 - Fleet analytics
 
---
+---
 
 ## AI Tools Used
 
@@ -213,7 +213,7 @@ Claude (Anthropic) was used throughout this project:
 
 All generated code was read, understood, and tested before being used. No code was accepted without being reviewed.
 
---
+---
 
 ## AI Chat Logs
 
